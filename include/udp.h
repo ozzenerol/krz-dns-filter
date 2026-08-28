@@ -17,7 +17,7 @@
 /* Configuration constants */
 #define MAX_EVENTS 1000
 #define BUFFER_SIZE 512
-#define DEFAULT_PORT 5353
+#define DEFAULT_PORT 5354
 
 /* Server structure to hold state */
 typedef struct {

@@ -1,11 +1,16 @@
 #include "../include/udp.h"
 #include "../include/log.h"
+#include "../include/dns.h"
+#include "../include/blacklist.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
+#include <sys/time.h>
 
-#define DEFAULT_PORT 5353
+#define UPSTREAM_DNS_IP      "1.1.1.1"
+#define UPSTREAM_DNS_PORT    53
+#define UPSTREAM_TIMEOUT_SEC 2
 
 /* Sets the socket fd flags to O_NONBLOCK */
 static int set_nonblocking(int fd) {
@@ -73,16 +78,53 @@ static int setup_epoll(UDP_SRV *srv) {
 static void handle_client_data(UDP_SRV *srv, struct sockaddr_in *client_addr, socklen_t client_len,
         char *buffer, ssize_t bytes_received) {
 
-    buffer[bytes_received] = '\0';
-
     char client_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr->sin_addr, client_ip, sizeof(client_ip));
 
-    LOG_INFO("Received %zd bytes from %s: %d: %s\n", bytes_received, client_ip, ntohs(client_addr->sin_port), buffer);
+    char domain[BUFFER_SIZE];
+    if (dns_get_domain((unsigned char *) buffer, (int) bytes_received, domain) == -1) {
+        LOG_WARN("Malformed DNS packet from %s:%d, dropping", client_ip, ntohs(client_addr->sin_port));
+        return;
+    }
 
-    ssize_t bytes_sent = sendto(srv->server_fd, buffer, bytes_received, 0, (struct sockaddr*) client_addr, client_len);
-    if (bytes_sent < 0)
-        LOG_WARN("Nothing was sent to the client");
+    LOG_INFO("Query from %s:%d -> %s", client_ip, ntohs(client_addr->sin_port), domain);
+
+    if (blacklist_contains(domain) != NULL) {
+        LOG_WARN("Blocked domain: %s", domain);
+
+        dns_build_block_response((unsigned char *) buffer, (int) bytes_received);
+
+        if (sendto(srv->server_fd, buffer, bytes_received, 0,
+                (struct sockaddr *) client_addr, client_len) < 0)
+            LOG_WARN("Failed to send blocked response to %s:%d", client_ip, ntohs(client_addr->sin_port));
+
+        return;
+    }
+
+    int upstream_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (upstream_fd == -1) {
+        LOG_ERROR("Failed to create upstream socket: %d", errno);
+        return;
+    }
+
+    struct timeval tv = { .tv_sec = UPSTREAM_TIMEOUT_SEC, .tv_usec = 0 };
+    setsockopt(upstream_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    char response[BUFFER_SIZE];
+    int response_len = dns_forward(upstream_fd, buffer, (int) bytes_received,
+                                    UPSTREAM_DNS_IP, UPSTREAM_DNS_PORT,
+                                    response, sizeof(response));
+
+    close(upstream_fd);
+
+    if (response_len < 0) {
+        LOG_WARN("No response from upstream DNS %s for query %s", UPSTREAM_DNS_IP, domain);
+        return;
+    }
+
+    if (sendto(srv->server_fd, response, response_len, 0,
+            (struct sockaddr *) client_addr, client_len) < 0)
+        LOG_WARN("Failed to relay upstream response to %s:%d", client_ip, ntohs(client_addr->sin_port));
 }
 
 int udp_srv_init(UDP_SRV *srv, uint16_t port) {
@@ -114,12 +156,13 @@ int udp_srv_start(UDP_SRV *srv) {
 
     struct epoll_event events[MAX_EVENTS];
     struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_len);
     char buffer[BUFFER_SIZE];
 
     LOG_INFO("UDP server listening on port %u", srv->port);
     LOG_INFO("Using epoll for event handling");
     LOG_INFO("Press Ctrl + C to stop");
+
+    srv->running = true;
 
     while (srv->running) {
         int num_events = epoll_wait(srv->epoll_fd, events, MAX_EVENTS, -1);
@@ -132,6 +175,7 @@ int udp_srv_start(UDP_SRV *srv) {
         for (int i = 0; i < num_events; i++) {
             if (events[i].data.fd == srv->server_fd) {
                 memset(buffer, 0, BUFFER_SIZE);
+                socklen_t client_len = sizeof(client_addr);
                 ssize_t bytes_received = recvfrom(
                             srv->server_fd, buffer,
                             BUFFER_SIZE - 1, 0,
@@ -148,6 +192,35 @@ int udp_srv_start(UDP_SRV *srv) {
                 handle_client_data(srv, &client_addr, client_len, buffer, bytes_received);
             }
         }
+    }
+
+    return 0;
+}
+
+int udp_srv_stop(UDP_SRV *srv) {
+    if (srv == NULL) {
+        LOG_ERROR("UDP_SRV *srv cannot be NULL");
+        return -1;
+    }
+
+    srv->running = false;
+    return 0;
+}
+
+int udp_srv_cleanup(UDP_SRV *srv) {
+    if (srv == NULL) {
+        LOG_ERROR("UDP_SRV *srv cannot be NULL");
+        return -1;
+    }
+
+    if (srv->epoll_fd != -1) {
+        close(srv->epoll_fd);
+        srv->epoll_fd = -1;
+    }
+
+    if (srv->server_fd != -1) {
+        close(srv->server_fd);
+        srv->server_fd = -1;
     }
 
     return 0;

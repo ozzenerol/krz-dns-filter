@@ -1,10 +1,13 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "../include/blacklist.h"
 #include "../include/log.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
-#define BUFFER_SIZE 256
+#define BUFFER_SIZE 1024 
 #define COMMENT '#'
 
 BLACKLIST *blacklist = NULL;
@@ -17,6 +20,11 @@ void blacklist_add(const char *domain) {
     BLACKLIST *item = malloc(sizeof(BLACKLIST));
     if (item == NULL) {
         LOG_ERROR("Error while allocating memory for blacklist item: %d", errno);
+        return;
+    }
+
+    if (blacklist_contains(domain) != NULL) {
+        LOG_WARN("Domain %s is already present", domain);
         return;
     }
     
@@ -41,7 +49,7 @@ int blacklist_load(const char *filepath) {
 
     char buffer[BUFFER_SIZE];
     while (fgets(buffer, sizeof(buffer), file)) {
-        buffer[strcspn(buffer, "\r\n")] = '\0';
+        buffer[strcspn(buffer, "\n\r")] = '\0';
         if (buffer[0] == '\0' || buffer[0] == COMMENT)
             continue;
         blacklist_add(buffer);

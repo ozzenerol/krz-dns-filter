@@ -5,4 +5,4 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 make clean
 make
-./bin/krz-dns-filter
+./bin/krz-dns-filter /home/lab/krz-dns-filter/blacklist.txt

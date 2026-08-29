@@ -8,11 +8,14 @@
 #include <sys/epoll.h>
 #include <sys/time.h>
 
-#define UPSTREAM_DNS_IP      "1.1.1.1"
-#define UPSTREAM_DNS_PORT    53
-#define UPSTREAM_TIMEOUT_SEC 2
+#define UPSTREAM_DNS_DEFAULT_PORT    53
+#define UPSTREAM_TIMEOUT_SEC         2
 
-/* Sets the socket fd flags to O_NONBLOCK */
+// Just Cloudflare and Google DNS ips. 
+// If these two go down, the whole world is fucked so I don't care about any other DNS ip
+static const char *upstream_dns_ips[] = { "1.1.1.1", "8.8.8.8" }; 
+static const size_t upstream_dns_ips_size = 2;
+
 static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -23,7 +26,6 @@ static int set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-/* Sets up the UDP socket */
 static int setup_socket(UDP_SRV *srv) {
     srv->server_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (srv->server_fd == -1) {
@@ -55,7 +57,6 @@ static int setup_socket(UDP_SRV *srv) {
     return 0;
 }
 
-/* Sets the epoll. */
 static int setup_epoll(UDP_SRV *srv) {
     srv->epoll_fd = epoll_create1(0);
     if (srv->epoll_fd == -1) {
@@ -77,7 +78,7 @@ static int setup_epoll(UDP_SRV *srv) {
 
 static void handle_client_data(UDP_SRV *srv, struct sockaddr_in *client_addr, socklen_t client_len,
         char *buffer, ssize_t bytes_received) {
-
+    
     char client_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr->sin_addr, client_ip, sizeof(client_ip));
 
@@ -111,14 +112,21 @@ static void handle_client_data(UDP_SRV *srv, struct sockaddr_in *client_addr, so
     setsockopt(upstream_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     char response[BUFFER_SIZE];
-    int response_len = dns_forward(upstream_fd, buffer, (int) bytes_received,
-                                    UPSTREAM_DNS_IP, UPSTREAM_DNS_PORT,
-                                    response, sizeof(response));
-
-    close(upstream_fd);
+    
+    int response_len = 0;
+    for (size_t i = 0; i < upstream_dns_ips_size; i++) {
+        response_len = dns_forward(upstream_fd, buffer, (int) bytes_received, upstream_dns_ips[i], UPSTREAM_DNS_DEFAULT_PORT, response, sizeof(response));
+        if (response_len < 0) {
+            LOG_WARN("Upstream %s failed to respond. Attempting the next upstream server", upstream_dns_ips[i]);
+            continue;
+        } else {
+            close(upstream_fd);
+            break;
+        }
+    }
 
     if (response_len < 0) {
-        LOG_WARN("No response from upstream DNS %s for query %s", UPSTREAM_DNS_IP, domain);
+        LOG_WARN("No response from any registered upstreams DNS { %s or %s } for query %s", upstream_dns_ips[0], upstream_dns_ips[1], domain);
         return;
     }
 

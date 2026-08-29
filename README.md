@@ -2,6 +2,10 @@
 
 A small UDP DNS server that blocks domains from a blacklist and forwards everything else to an upstream resolver.
 
+I personally point my machines to it so I get less tracked.
+
+!!!!!!!!!! DO NOT ADD THIS TO A ROUTER !!!!!!!!!!
+
 ## Requirements
 
 - A C compiler (gcc or clang)
@@ -33,6 +37,7 @@ Querying a domain that is in the blacklist should return NXDOMAIN. Anything else
 ## Notes
 
 TCP is not supported yet, only UDP.
+The current blocklist has around 260_000 domains registered.
 
 ## Clean
 
